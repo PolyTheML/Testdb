@@ -518,11 +518,6 @@ def main():
         4. **Preview** table contents if needed
         5. **Download** any table as CSV or Excel with one click!
         
-        ### 📋 Required Dependencies:
-        ```bash
-        pip install streamlit pandas openpyxl
-        ```
-        
         ### 💡 Tips:
         - File names include timestamps to avoid conflicts
         - Use the search feature to quickly find specific tables
