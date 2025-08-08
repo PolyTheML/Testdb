@@ -118,6 +118,262 @@ class SQLiteConnector:
         except Exception as e:
             st.error(f"Error getting table info for {table_name}: {e}")
             return None
+    
+    def get_column_values(self, table_name, column_name, limit=100):
+        """Get unique values for a column (for filter dropdowns)"""
+        try:
+            conn = self._get_connection()
+            query = f"SELECT DISTINCT [{column_name}] FROM [{table_name}] WHERE [{column_name}] IS NOT NULL ORDER BY [{column_name}] LIMIT {limit}"
+            cursor = conn.cursor()
+            cursor.execute(query)
+            values = [row[0] for row in cursor.fetchall()]
+            conn.close()
+            return values
+        except Exception as e:
+            st.error(f"Error getting column values: {e}")
+            return []
+
+def build_visual_query(table_name, table_info):
+    """Build SQL query using visual interface"""
+    st.markdown("### 🎯 **Visual Query Builder**")
+    
+    columns = [col[0] for col in table_info['column_info']]
+    column_types = {col[0]: col[1] for col in table_info['column_info']}
+    
+    # Column Selection
+    st.markdown("**1. Select Columns to Include:**")
+    col_selection_type = st.radio(
+        "Choose columns:",
+        ["All Columns", "Specific Columns"],
+        horizontal=True,
+        key=f"col_type_{table_name}"
+    )
+    
+    selected_columns = []
+    if col_selection_type == "All Columns":
+        selected_columns = columns
+        st.info(f"✅ All {len(columns)} columns selected")
+    else:
+        selected_columns = st.multiselect(
+            "Choose columns:",
+            columns,
+            default=columns[:5] if len(columns) > 5 else columns,
+            key=f"cols_{table_name}"
+        )
+        if not selected_columns:
+            st.warning("⚠️ Please select at least one column")
+            return None
+    
+    # Filters Section
+    st.markdown("**2. Add Filters (Optional):**")
+    
+    # Initialize filters in session state
+    filter_key = f"filters_{table_name}"
+    if filter_key not in st.session_state:
+        st.session_state[filter_key] = []
+    
+    # Add new filter button
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("➕ Add Filter", key=f"add_filter_{table_name}"):
+            st.session_state[filter_key].append({
+                'column': columns[0],
+                'operator': 'equals',
+                'value': '',
+                'logic': 'AND'
+            })
+            st.rerun()
+    
+    with col2:
+        if st.session_state[filter_key] and st.button("🗑️ Clear All Filters", key=f"clear_filters_{table_name}"):
+            st.session_state[filter_key] = []
+            st.rerun()
+    
+    # Display existing filters
+    for i, filter_item in enumerate(st.session_state[filter_key]):
+        with st.container():
+            st.markdown(f"**Filter {i+1}:**")
+            
+            filter_col1, filter_col2, filter_col3, filter_col4, filter_col5 = st.columns([2, 2, 3, 1, 1])
+            
+            with filter_col1:
+                # Logic operator (AND/OR) - not shown for first filter
+                if i > 0:
+                    logic = st.selectbox(
+                        "Logic:",
+                        ["AND", "OR"],
+                        index=0 if filter_item['logic'] == 'AND' else 1,
+                        key=f"logic_{table_name}_{i}"
+                    )
+                    st.session_state[filter_key][i]['logic'] = logic
+                else:
+                    st.write("WHERE")
+            
+            with filter_col2:
+                # Column selection
+                column = st.selectbox(
+                    "Column:",
+                    columns,
+                    index=columns.index(filter_item['column']) if filter_item['column'] in columns else 0,
+                    key=f"filter_col_{table_name}_{i}"
+                )
+                st.session_state[filter_key][i]['column'] = column
+            
+            with filter_col3:
+                # Operator selection
+                col_type = column_types.get(column, 'TEXT').upper()
+                
+                if 'INT' in col_type or 'REAL' in col_type or 'NUMERIC' in col_type:
+                    operators = ['equals (=)', 'not equals (!=)', 'greater than (>)', 'less than (<)', 
+                               'greater or equal (>=)', 'less or equal (<=)', 'is null', 'is not null']
+                else:
+                    operators = ['equals (=)', 'not equals (!=)', 'contains (LIKE)', 'starts with', 
+                               'ends with', 'is null', 'is not null']
+                
+                operator = st.selectbox(
+                    "Operator:",
+                    operators,
+                    index=0,
+                    key=f"filter_op_{table_name}_{i}"
+                )
+                st.session_state[filter_key][i]['operator'] = operator
+            
+            with filter_col4:
+                # Value input (only if operator needs a value)
+                if 'null' not in operator.lower():
+                    if 'INT' in col_type:
+                        value = st.number_input(
+                            "Value:",
+                            value=0,
+                            key=f"filter_val_{table_name}_{i}",
+                            label_visibility="collapsed"
+                        )
+                    elif 'REAL' in col_type or 'NUMERIC' in col_type:
+                        value = st.number_input(
+                            "Value:",
+                            value=0.0,
+                            key=f"filter_val_{table_name}_{i}",
+                            label_visibility="collapsed"
+                        )
+                    else:
+                        value = st.text_input(
+                            "Value:",
+                            value=filter_item.get('value', ''),
+                            key=f"filter_val_{table_name}_{i}",
+                            label_visibility="collapsed",
+                            placeholder="Enter value..."
+                        )
+                    st.session_state[filter_key][i]['value'] = value
+                else:
+                    st.write("—")
+            
+            with filter_col5:
+                # Remove filter button
+                if st.button("❌", key=f"remove_filter_{table_name}_{i}", help="Remove this filter"):
+                    st.session_state[filter_key].pop(i)
+                    st.rerun()
+    
+    # Sorting Section
+    st.markdown("**3. Sort Results (Optional):**")
+    
+    sort_enabled = st.checkbox("Enable sorting", key=f"sort_enabled_{table_name}")
+    sort_column = None
+    sort_direction = None
+    
+    if sort_enabled:
+        sort_col1, sort_col2 = st.columns(2)
+        with sort_col1:
+            sort_column = st.selectbox(
+                "Sort by column:",
+                selected_columns,
+                key=f"sort_col_{table_name}"
+            )
+        with sort_col2:
+            sort_direction = st.selectbox(
+                "Sort direction:",
+                ["Ascending (A-Z)", "Descending (Z-A)"],
+                key=f"sort_dir_{table_name}"
+            )
+    
+    # Limit Section
+    st.markdown("**4. Limit Results (Optional):**")
+    limit_enabled = st.checkbox("Limit number of rows", key=f"limit_enabled_{table_name}")
+    row_limit = None
+    
+    if limit_enabled:
+        row_limit = st.number_input(
+            "Maximum rows:",
+            min_value=1,
+            max_value=1000000,
+            value=1000,
+            key=f"row_limit_{table_name}"
+        )
+    
+    # Build the SQL query
+    if not selected_columns:
+        return None
+    
+    # SELECT clause
+    if col_selection_type == "All Columns":
+        select_clause = "*"
+    else:
+        select_clause = ", ".join([f"[{col}]" for col in selected_columns])
+    
+    query = f"SELECT {select_clause} FROM [{table_name}]"
+    
+    # WHERE clause
+    where_conditions = []
+    for i, filter_item in enumerate(st.session_state[filter_key]):
+        column = filter_item['column']
+        operator = filter_item['operator']
+        value = filter_item.get('value', '')
+        logic = filter_item.get('logic', 'AND')
+        
+        # Build condition based on operator
+        if operator == 'equals (=)':
+            condition = f"[{column}] = '{value}'"
+        elif operator == 'not equals (!=)':
+            condition = f"[{column}] != '{value}'"
+        elif operator == 'greater than (>)':
+            condition = f"[{column}] > {value}"
+        elif operator == 'less than (<)':
+            condition = f"[{column}] < {value}"
+        elif operator == 'greater or equal (>=)':
+            condition = f"[{column}] >= {value}"
+        elif operator == 'less or equal (<=)':
+            condition = f"[{column}] <= {value}"
+        elif operator == 'contains (LIKE)':
+            condition = f"[{column}] LIKE '%{value}%'"
+        elif operator == 'starts with':
+            condition = f"[{column}] LIKE '{value}%'"
+        elif operator == 'ends with':
+            condition = f"[{column}] LIKE '%{value}'"
+        elif operator == 'is null':
+            condition = f"[{column}] IS NULL"
+        elif operator == 'is not null':
+            condition = f"[{column}] IS NOT NULL"
+        else:
+            continue
+        
+        # Add logic operator for subsequent conditions
+        if i > 0:
+            where_conditions.append(f" {logic} {condition}")
+        else:
+            where_conditions.append(condition)
+    
+    if where_conditions:
+        query += " WHERE " + "".join(where_conditions)
+    
+    # ORDER BY clause
+    if sort_enabled and sort_column:
+        direction = "ASC" if sort_direction == "Ascending (A-Z)" else "DESC"
+        query += f" ORDER BY [{sort_column}] {direction}"
+    
+    # LIMIT clause
+    if limit_enabled and row_limit:
+        query += f" LIMIT {row_limit}"
+    
+    return query
 
 def convert_df_to_csv(df):
     """Convert dataframe to CSV for download"""
@@ -138,7 +394,7 @@ def main():
     )
     
     st.title("🗃️ SQLite Table Downloader")
-    st.markdown("Connect to your SQLite database and download any table with a single click!")
+    st.markdown("Connect to your SQLite database and download any table with visual query builder!")
     
     # Sidebar for database connection
     with st.sidebar:
@@ -244,7 +500,7 @@ def main():
                             
                             query_type = st.radio(
                                 "Choose extraction method:",
-                                ["All Data", "Row Range", "Custom Query"],
+                                ["All Data", "Row Range", "Visual Query Builder", "Custom SQL"],
                                 key=f"query_type_{table}",
                                 horizontal=True
                             )
@@ -273,7 +529,33 @@ def main():
                                     )
                                 st.info(f"Will extract rows {offset+1} to {min(offset+limit, table_info['rows'])}")
                             
-                            elif query_type == "Custom Query":
+                            elif query_type == "Visual Query Builder":
+                                custom_query = build_visual_query(table, table_info)
+                                
+                                if custom_query:
+                                    # Show generated query
+                                    st.markdown("**Generated SQL Query:**")
+                                    st.code(custom_query, language='sql')
+                                    
+                                    # Validate query button
+                                    if st.button(f"✅ Validate Query", key=f"validate_visual_{table}"):
+                                        is_valid, message = st.session_state.db_connector.validate_query(custom_query)
+                                        if is_valid:
+                                            st.success(f"✅ {message}")
+                                            # Show sample of results
+                                            try:
+                                                sample_df = st.session_state.db_connector.get_table_data(table, custom_query=f"{custom_query} LIMIT 3")
+                                                if sample_df is not None and not sample_df.empty:
+                                                    st.write("**Query preview (first 3 rows):**")
+                                                    st.dataframe(sample_df, use_container_width=True)
+                                                else:
+                                                    st.warning("Query returned no results")
+                                            except:
+                                                st.warning("Could not preview query results")
+                                        else:
+                                            st.error(f"❌ {message}")
+                            
+                            elif query_type == "Custom SQL":
                                 st.markdown("**Write your custom SQL query:**")
                                 custom_query = st.text_area(
                                     "SQL Query:",
@@ -321,7 +603,7 @@ def main():
                                 with dl_col1:
                                     if st.button(f"📄 Download CSV", key=f"csv_{table}", use_container_width=True):
                                         with st.spinner("Preparing download..."):
-                                            if query_type == "Custom Query":
+                                            if query_type in ["Custom SQL", "Visual Query Builder"]:
                                                 df = st.session_state.db_connector.get_table_data(table, custom_query=custom_query)
                                             else:
                                                 df = st.session_state.db_connector.get_table_data(table, limit=limit, offset=offset)
@@ -332,7 +614,7 @@ def main():
                                                 filter_suffix = ""
                                                 if query_type == "Row Range":
                                                     filter_suffix = f"_rows_{offset+1}to{offset+len(df)}"
-                                                elif query_type == "Custom Query":
+                                                elif query_type in ["Custom SQL", "Visual Query Builder"]:
                                                     filter_suffix = "_filtered"
                                                 
                                                 st.download_button(
@@ -346,7 +628,7 @@ def main():
                                 with dl_col2:
                                     if st.button(f"📊 Download Excel", key=f"excel_{table}", use_container_width=True):
                                         with st.spinner("Preparing download..."):
-                                            if query_type == "Custom Query":
+                                            if query_type in ["Custom SQL", "Visual Query Builder"]:
                                                 df = st.session_state.db_connector.get_table_data(table, custom_query=custom_query)
                                             else:
                                                 df = st.session_state.db_connector.get_table_data(table, limit=limit, offset=offset)
@@ -357,7 +639,7 @@ def main():
                                                 filter_suffix = ""
                                                 if query_type == "Row Range":
                                                     filter_suffix = f"_rows_{offset+1}to{offset+len(df)}"
-                                                elif query_type == "Custom Query":
+                                                elif query_type in ["Custom SQL", "Visual Query Builder"]:
                                                     filter_suffix = "_filtered"
                                                 
                                                 st.download_button(
@@ -368,7 +650,7 @@ def main():
                                                     key=f"dl_excel_{table}_{timestamp}"
                                                 )
             
-            # Preview section
+            # Preview section (keeping the existing preview code)
             if hasattr(st.session_state, 'preview_table'):
                 st.markdown("---")
                 preview_table = st.session_state.preview_table
@@ -378,11 +660,14 @@ def main():
                 if hasattr(st.session_state, 'preview_query_type'):
                     query_type = st.session_state.preview_query_type
                     
-                    if query_type == "Custom Query" and hasattr(st.session_state, 'preview_custom_query'):
+                    if query_type in ["Custom SQL", "Visual Query Builder"] and hasattr(st.session_state, 'preview_custom_query'):
                         # For preview, limit custom queries to 100 rows
                         custom_query = st.session_state.preview_custom_query
-                        preview_query = f"{custom_query} LIMIT 100"
-                        df = st.session_state.db_connector.get_table_data(preview_table, custom_query=preview_query)
+                        if custom_query:
+                            preview_query = f"{custom_query} LIMIT 100"
+                            df = st.session_state.db_connector.get_table_data(preview_table, custom_query=preview_query)
+                        else:
+                            df = st.session_state.db_connector.get_table_data(preview_table, limit=100)
                     elif query_type == "Row Range":
                         limit = getattr(st.session_state, 'preview_limit', None)
                         offset = getattr(st.session_state, 'preview_offset', None)
@@ -425,8 +710,8 @@ def main():
                             offset = getattr(st.session_state, 'preview_offset', 0)
                             limit = getattr(st.session_state, 'preview_limit', 100)
                             filter_info = f"Showing rows {offset+1} to {offset+len(df)}"
-                        elif st.session_state.preview_query_type == "Custom Query":
-                            filter_info = "Custom SQL query applied (showing first 100 results)"
+                        elif st.session_state.preview_query_type in ["Custom SQL", "Visual Query Builder"]:
+                            filter_info = "Custom query applied (showing first 100 results)"
                         
                         if filter_info:
                             st.info(f"ℹ️ {filter_info}")
@@ -448,7 +733,7 @@ def main():
                     with download_col1:
                         if st.button("📄 Download Full CSV", key="preview_csv_full"):
                             with st.spinner("Preparing full dataset..."):
-                                if query_type == "Custom Query":
+                                if query_type in ["Custom SQL", "Visual Query Builder"]:
                                     full_df = st.session_state.db_connector.get_table_data(preview_table, custom_query=st.session_state.preview_custom_query)
                                 elif query_type == "Row Range":
                                     full_df = st.session_state.db_connector.get_table_data(preview_table, limit=st.session_state.preview_limit, offset=st.session_state.preview_offset)
@@ -470,7 +755,7 @@ def main():
                     with download_col2:
                         if st.button("📊 Download Full Excel", key="preview_excel_full"):
                             with st.spinner("Preparing full dataset..."):
-                                if query_type == "Custom Query":
+                                if query_type in ["Custom SQL", "Visual Query Builder"]:
                                     full_df = st.session_state.db_connector.get_table_data(preview_table, custom_query=st.session_state.preview_custom_query)
                                 elif query_type == "Row Range":
                                     full_df = st.session_state.db_connector.get_table_data(preview_table, limit=st.session_state.preview_limit, offset=st.session_state.preview_offset)
@@ -505,6 +790,7 @@ def main():
         - 📥 **Multiple extraction options:**
           - **All Data**: Download complete tables
           - **Row Range**: Specify start row and number of rows
+          - **Visual Query Builder**: Point-and-click filtering (NEW!)
           - **Custom SQL**: Write your own SELECT queries
         - 📥 **One-click downloads** in CSV or Excel format
         - 🔍 **Search tables** by name
@@ -515,14 +801,18 @@ def main():
         1. **Upload** your SQLite database file using the sidebar
         2. **Connect** to the database
         3. **Browse** available tables and their metadata
-        4. **Preview** table contents if needed
-        5. **Download** any table as CSV or Excel with one click!
+        4. **Choose** your extraction method:
+           - Use the **Visual Query Builder** for easy point-and-click filtering
+           - Or write **Custom SQL** for advanced queries
+        5. **Preview** table contents if needed
+        6. **Download** any table as CSV or Excel with one click!
         
         ### 💡 Tips:
+        - The **Visual Query Builder** lets you filter without writing SQL
+        - You can combine multiple filters with AND/OR logic
         - File names include timestamps to avoid conflicts
         - Use the search feature to quickly find specific tables
         - Preview data before downloading large tables
-        - The app handles special characters in table names automatically
         
         ---
         👈 **Get started by connecting to your SQLite database using the sidebar!**
