@@ -333,6 +333,15 @@ class MySQLConnector(DatabaseConnector):
                     user=self.username,
                     password=self.password
                 )
+                self.connection.close() # Close test connection
+                # Re-establish connection for operations
+                self.connection = mysql.connector.connect(
+                    host=self.host,
+                    port=self.port,
+                    database=self.database,
+                    user=self.username,
+                    password=self.password
+                )
                 return True
             else:
                 st.error("MySQL dependencies not installed. Please install: pip install mysql-connector-python sqlalchemy pymysql")
@@ -365,9 +374,9 @@ class MySQLConnector(DatabaseConnector):
                 query = custom_query
             else:
                 query = f"SELECT * FROM `{table_name}`"
-                if limit:
+                if limit is not None:
                     query += f" LIMIT {limit}"
-                    if offset:
+                    if offset is not None:
                         query += f" OFFSET {offset}"
             
             if self.engine:
@@ -396,6 +405,11 @@ class MySQLConnector(DatabaseConnector):
             if self.engine:
                 with self.engine.connect() as conn:
                     conn.execute(text(f"EXPLAIN {query}"))
+            else:
+                 cursor = self.connection.cursor()
+                 cursor.execute(f"EXPLAIN {query}")
+                 cursor.fetchall()
+                 cursor.close()
             return True, "Query is valid"
         except Exception as e:
             return False, f"Query error: {str(e)}"
@@ -456,6 +470,16 @@ def render_database_connection_form():
     """Render the database connection form in sidebar"""
     st.header("🔌 Database Connection")
     
+    # Initialize session state variables if they don't exist
+    if 'connected' not in st.session_state:
+        st.session_state.connected = False
+    if 'db_type' not in st.session_state:
+        st.session_state.db_type = None
+    if 'db_connector' not in st.session_state:
+        st.session_state.db_connector = None
+    if 'connector_params' not in st.session_state:
+        st.session_state.connector_params = {}
+    
     # Database type selection
     available_types = ["SQLite"]
     if POSTGRES_AVAILABLE or SQLALCHEMY_AVAILABLE:
@@ -491,7 +515,11 @@ def render_database_connection_form():
         
         # Handle uploaded file
         if uploaded_file is not None:
-            temp_db_path = f"temp_{uploaded_file.name}"
+            # Save the uploaded file to a temporary location
+            temp_dir = "temp_db"
+            if not os.path.exists(temp_dir):
+                os.makedirs(temp_dir)
+            temp_db_path = os.path.join(temp_dir, uploaded_file.name)
             with open(temp_db_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
             db_path = temp_db_path
@@ -547,7 +575,7 @@ def render_database_connection_form():
             st.error("Please provide a database file or path")
             return
         elif db_type in ["PostgreSQL", "MySQL"]:
-            required_fields = ['host', 'database', 'username', 'password']
+            required_fields = ['host', 'database', 'username']
             missing_fields = [field for field in required_fields if not connector_params.get(field)]
             if missing_fields:
                 st.error(f"Please fill in: {', '.join(missing_fields)}")
@@ -555,49 +583,54 @@ def render_database_connection_form():
         
         # Attempt connection
         try:
-            connector = create_database_connector(db_type, **connector_params)
-            if connector.connect():
-                st.session_state.db_connector = connector
-                st.session_state.connected = True
-                st.session_state.db_type = db_type
-                st.session_state.connector_params = connector_params
-                
-                if db_type == "SQLite":
-                    db_name = os.path.basename(connector_params['db_path'])
+            with st.spinner(f"Connecting to {db_type}..."):
+                connector = create_database_connector(db_type, **connector_params)
+                if connector.connect():
+                    st.session_state.db_connector = connector
+                    st.session_state.connected = True
+                    st.session_state.db_type = db_type
+                    st.session_state.connector_params = connector_params
+                    
+                    if db_type == "SQLite":
+                        db_name = os.path.basename(connector_params['db_path'])
+                    else:
+                        db_name = f"{connector_params['database']}@{connector_params['host']}"
+                    
+                    st.success(f"✅ Connected to: {db_name}")
+                    st.rerun()
                 else:
-                    db_name = f"{connector_params['database']} ({connector_params['host']})"
-                
-                st.success(f"✅ Connected to: {db_name}")
-            else:
-                st.session_state.connected = False
+                    st.session_state.connected = False
         except Exception as e:
             st.error(f"Connection failed: {e}")
             st.session_state.connected = False
     
     # Connection status
-    if hasattr(st.session_state, 'connected') and st.session_state.connected:
+    if st.session_state.connected:
         st.success("🟢 Connected")
         
         # Show connection info
         if st.session_state.db_type == "SQLite":
-            db_name = os.path.basename(st.session_state.connector_params['db_path'])
+            db_name = os.path.basename(st.session_state.connector_params.get('db_path', 'Unknown'))
             st.info(f"**{st.session_state.db_type}**: {db_name}")
-        else:
+        elif st.session_state.db_type in ["PostgreSQL", "MySQL"]:
             params = st.session_state.connector_params
-            st.info(f"**{st.session_state.db_type}**: {params['database']} @ {params['host']}:{params['port']}")
+            st.info(f"**{st.session_state.db_type}**: {params.get('database', 'Unknown')} @ {params.get('host', 'Unknown')}:{params.get('port', 'Unknown')}")
         
         if st.button("🔄 Refresh Tables"):
             st.rerun()
             
         if st.button("❌ Disconnect"):
-            if hasattr(st.session_state, 'db_connector'):
+            if st.session_state.db_connector:
                 st.session_state.db_connector.disconnect()
-            st.session_state.connected = False
+            
+            # Clear all session state keys
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            
             st.rerun()
     else:
         st.error("🔴 Not Connected")
 
-# Update build_visual_query function to handle different SQL dialects
 def build_visual_query(table_name, table_info, db_type="SQLite"):
     """Build SQL query using visual interface (adapted for different databases)"""
     st.markdown("### 🎯 **Visual Query Builder**")
@@ -605,7 +638,9 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
     columns = [col[0] for col in table_info['column_info']]
     column_types = {col[0]: col[1] for col in table_info['column_info']}
     
-    # Column Selection
+    # --- UI Elements for Query Building ---
+
+    # 1. Column Selection
     st.markdown("**1. Select Columns to Include:**")
     col_selection_type = st.radio(
         "Choose columns:",
@@ -628,18 +663,116 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
         if not selected_columns:
             st.warning("⚠️ Please select at least one column")
             return None
-    
-    # Filters Section (same as before)
+
+    # 2. Filters Section
     st.markdown("**2. Add Filters (Optional):**")
     
     filter_key = f"filters_{table_name}"
     if filter_key not in st.session_state:
         st.session_state[filter_key] = []
     
-    # [Rest of the filter logic remains the same...]
-    # ... (keeping the existing filter code for brevity)
+    # Add/Clear filter buttons
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("➕ Add Filter", key=f"add_filter_{table_name}"):
+            st.session_state[filter_key].append({
+                'column': columns[0],
+                'operator': 'equals (=)',
+                'value': '',
+                'logic': 'AND'
+            })
+            st.rerun()
     
-    # Build the SQL query with database-specific syntax
+    with col2:
+        if st.session_state[filter_key] and st.button("🗑️ Clear All Filters", key=f"clear_filters_{table_name}"):
+            st.session_state[filter_key] = []
+            st.rerun()
+    
+    # Display existing filter UI
+    for i, filter_item in enumerate(st.session_state[filter_key]):
+        with st.container(border=True):
+            filter_col1, filter_col2, filter_col3, filter_col4, filter_col5 = st.columns([1.5, 3, 2.5, 3, 1])
+            
+            with filter_col1:
+                if i > 0:
+                    logic = st.selectbox(
+                        "Logic",
+                        ["AND", "OR"],
+                        index=0 if filter_item['logic'] == 'AND' else 1,
+                        key=f"logic_{table_name}_{i}",
+                        label_visibility="collapsed"
+                    )
+                    st.session_state[filter_key][i]['logic'] = logic
+                else:
+                    st.write("WHERE")
+            
+            with filter_col2:
+                column = st.selectbox(
+                    "Column",
+                    columns,
+                    index=columns.index(filter_item['column']) if filter_item['column'] in columns else 0,
+                    key=f"filter_col_{table_name}_{i}",
+                    label_visibility="collapsed"
+                )
+                st.session_state[filter_key][i]['column'] = column
+            
+            with filter_col3:
+                col_type = column_types.get(column, 'TEXT').upper()
+                
+                if any(x in col_type for x in ['INT', 'REAL', 'NUMERIC', 'DECIMAL', 'FLOAT', 'DOUBLE', 'SERIAL', 'BIGINT']):
+                    operators = ['equals (=)', 'not equals (!=)', 'greater than (>)', 'less than (<)', 
+                               'greater or equal (>=)', 'less or equal (<=)', 'is null', 'is not null']
+                else: # Text or other types
+                    operators = ['equals (=)', 'not equals (!=)', 'contains (LIKE)', 'starts with', 
+                               'ends with', 'is null', 'is not null']
+                
+                operator = st.selectbox(
+                    "Operator",
+                    operators,
+                    index=operators.index(filter_item['operator']) if filter_item['operator'] in operators else 0,
+                    key=f"filter_op_{table_name}_{i}",
+                    label_visibility="collapsed"
+                )
+                st.session_state[filter_key][i]['operator'] = operator
+            
+            with filter_col4:
+                if 'null' not in operator.lower():
+                    # Determine input type based on column data type
+                    if any(x in col_type for x in ['INT', 'SERIAL', 'BIGINT']):
+                        value = st.number_input("Value", value=filter_item.get('value', 0), step=1, key=f"filter_val_{table_name}_{i}", label_visibility="collapsed")
+                    elif any(x in col_type for x in ['REAL', 'NUMERIC', 'DECIMAL', 'FLOAT', 'DOUBLE']):
+                        value = st.number_input("Value", value=float(filter_item.get('value', 0.0)), format="%.4f", key=f"filter_val_{table_name}_{i}", label_visibility="collapsed")
+                    else:
+                        value = st.text_input("Value", value=filter_item.get('value', ''), key=f"filter_val_{table_name}_{i}", label_visibility="collapsed", placeholder="Enter value...")
+                    st.session_state[filter_key][i]['value'] = value
+                else:
+                    st.write(" ") # Placeholder for alignment
+
+            with filter_col5:
+                if st.button("❌", key=f"remove_filter_{table_name}_{i}", help="Remove this filter"):
+                    st.session_state[filter_key].pop(i)
+                    st.rerun()
+
+    # 3. Sorting Section
+    st.markdown("**3. Sort Results (Optional):**")
+    sort_enabled = st.checkbox("Enable sorting", key=f"sort_enabled_{table_name}")
+    sort_column, sort_direction = None, None
+    if sort_enabled:
+        sort_col1, sort_col2 = st.columns(2)
+        with sort_col1:
+            sort_column = st.selectbox("Sort by column:", selected_columns, key=f"sort_col_{table_name}")
+        with sort_col2:
+            sort_direction = st.selectbox("Sort direction:", ["Ascending (A-Z)", "Descending (Z-A)"], key=f"sort_dir_{table_name}")
+    
+    # 4. Limit Section
+    st.markdown("**4. Limit Results (Optional):**")
+    limit_enabled = st.checkbox("Limit number of rows", key=f"limit_enabled_{table_name}")
+    row_limit = None
+    if limit_enabled:
+        row_limit = st.number_input("Maximum rows:", min_value=1, max_value=1000000, value=1000, key=f"row_limit_{table_name}")
+
+    # --- Build the SQL Query from UI state ---
+    
     if not selected_columns:
         return None
     
@@ -653,21 +786,94 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
             select_clause = ", ".join([f'"{col}"' for col in selected_columns])
         else:  # MySQL
             select_clause = ", ".join([f"`{col}`" for col in selected_columns])
-    
-    # FROM clause with proper quoting
+            
+    # FROM clause
     if db_type == "SQLite":
         query = f"SELECT {select_clause} FROM [{table_name}]"
     elif db_type == "PostgreSQL":
         query = f'SELECT {select_clause} FROM "{table_name}"'
     else:  # MySQL
         query = f"SELECT {select_clause} FROM `{table_name}`"
+        
+    # WHERE clause
+    where_conditions = []
+    for i, filter_item in enumerate(st.session_state[filter_key]):
+        column = filter_item['column']
+        operator = filter_item['operator']
+        value = filter_item.get('value', '')
+        logic = filter_item.get('logic', 'AND')
+        
+        # Column quoting based on database type
+        if db_type == "SQLite":
+            quoted_col = f"[{column}]"
+        elif db_type == "PostgreSQL":
+            quoted_col = f'"{column}"'
+        else:  # MySQL
+            quoted_col = f"`{column}`"
+
+        # Handle string vs numeric values for quoting
+        col_type = column_types.get(column, 'TEXT').upper()
+        is_numeric = any(x in col_type for x in ['INT', 'REAL', 'NUMERIC', 'DECIMAL', 'FLOAT', 'DOUBLE', 'SERIAL', 'BIGINT'])
+        
+        # Basic sanitization for string values to prevent SQL injection
+        if not is_numeric and isinstance(value, str):
+            safe_value = value.replace("'", "''") 
+            quoted_value = f"'{safe_value}'"
+        else:
+            quoted_value = value
+            
+        condition = ""
+        # Build condition based on operator
+        if operator == 'equals (=)':
+            condition = f"{quoted_col} = {quoted_value}"
+        elif operator == 'not equals (!=)':
+            condition = f"{quoted_col} != {quoted_value}"
+        elif operator == 'greater than (>)':
+            condition = f"{quoted_col} > {quoted_value}"
+        elif operator == 'less than (<)':
+            condition = f"{quoted_col} < {quoted_value}"
+        elif operator == 'greater or equal (>=)':
+            condition = f"{quoted_col} >= {quoted_value}"
+        elif operator == 'less or equal (<=)':
+            condition = f"{quoted_col} <= {quoted_value}"
+        elif operator == 'contains (LIKE)':
+            condition = f"{quoted_col} LIKE '%{str(value).replace('%', '%%')}%'"
+        elif operator == 'starts with':
+            condition = f"{quoted_col} LIKE '{str(value).replace('%', '%%')}%'"
+        elif operator == 'ends with':
+            condition = f"{quoted_col} LIKE '%{str(value).replace('%', '%%')}'"
+        elif operator == 'is null':
+            condition = f"{quoted_col} IS NULL"
+        elif operator == 'is not null':
+            condition = f"{quoted_col} IS NOT NULL"
+        else:
+            continue
+        
+        # Add logic operator for subsequent conditions
+        if i > 0:
+            where_conditions.append(f" {logic} {condition}")
+        else:
+            where_conditions.append(condition)
     
-    # WHERE clause (adapt column quoting based on database type)
-    # ... (adapt the existing WHERE clause logic with proper quoting)
+    if where_conditions:
+        query += " WHERE " + "".join(where_conditions)
+    
+    # ORDER BY clause
+    if sort_enabled and sort_column:
+        direction = "ASC" if sort_direction == "Ascending (A-Z)" else "DESC"
+        if db_type == "SQLite":
+            query += f" ORDER BY [{sort_column}] {direction}"
+        elif db_type == "PostgreSQL":
+            query += f' ORDER BY "{sort_column}" {direction}'
+        else:  # MySQL
+            query += f" ORDER BY `{sort_column}` {direction}"
+    
+    # LIMIT clause
+    if limit_enabled and row_limit:
+        query += f" LIMIT {row_limit}"
     
     return query
 
-# Keep the existing helper functions
 def convert_df_to_csv(df):
     """Convert dataframe to CSV for download"""
     return df.to_csv(index=False).encode('utf-8')
@@ -687,7 +893,7 @@ def main():
     )
     
     st.title("🗃️ Multi-Database Table Downloader")
-    st.markdown("Connect to SQLite, PostgreSQL, or MySQL databases and download tables with visual query builder!")
+    st.markdown("Connect to SQLite, PostgreSQL, or MySQL databases and download tables with a visual query builder!")
     
     # Show installation instructions if dependencies are missing
     if not (POSTGRES_AVAILABLE or MYSQL_AVAILABLE or SQLALCHEMY_AVAILABLE):
@@ -697,45 +903,221 @@ def main():
     with st.sidebar:
         render_database_connection_form()
     
-    # Main content area (keep existing logic but update for multi-database support)
-    if hasattr(st.session_state, 'connected') and st.session_state.connected:
-        # [Rest of the main logic remains similar, but now uses the abstract connector interface]
+    # Main content area
+    if st.session_state.get('connected') and st.session_state.get('db_connector'):
+        
+        db_connector = st.session_state.db_connector
         
         # Get available tables
-        tables = st.session_state.db_connector.get_tables()
+        try:
+            tables = db_connector.get_tables()
+        except Exception as e:
+            st.error(f"Error retrieving tables: {e}")
+            tables = []
         
         if tables:
             st.header(f"📋 Available Tables ({len(tables)} total)")
             
-            # [Keep the rest of the existing table display logic...]
-            # The beauty is that all connectors implement the same interface,
-            # so the rest of your code works unchanged!
+            # Search/filter tables
+            search_term = st.text_input("🔍 Search tables:", placeholder="Enter table name...")
+            if search_term:
+                filtered_tables = [table for table in tables if search_term.lower() in table.lower()]
+            else:
+                filtered_tables = tables
             
-            st.success(f"✅ Connected to {st.session_state.db_type} database with {len(tables)} tables")
-        else:
-            st.warning("⚠️ No tables found in the database.")
+            if not filtered_tables and search_term:
+                st.warning("No tables match your search.")
+            else:
+                # Display tables in expandable sections
+                for table in filtered_tables:
+                    with st.expander(f"📊 **{table}**", expanded=False):
+                        try:
+                            table_info = db_connector.get_table_info(table)
+                            
+                            if table_info:
+                                # Basic table info
+                                info_col1, info_col2, info_col3 = st.columns(3)
+                                with info_col1:
+                                    st.metric("Rows", f"{table_info['rows']:,}")
+                                with info_col2:
+                                    st.metric("Columns", table_info['columns'])
+                                with info_col3:
+                                    if st.button(f"📋 Show Columns", key=f"show_cols_btn_{table}"):
+                                        key = f"show_cols_state_{table}"
+                                        st.session_state[key] = not st.session_state.get(key, False)
+                                
+                                # Show column details
+                                if st.session_state.get(f"show_cols_state_{table}", False):
+                                    st.markdown("**Columns:**")
+                                    cols_display = st.columns(3)
+                                    for i, (col_name, col_type) in enumerate(table_info['column_info']):
+                                        with cols_display[i % 3]:
+                                            st.write(f"• **{col_name}** ({col_type})")
+                                
+                                st.markdown("---")
+                                
+                                # Query Options Section
+                                st.markdown("### 🔍 **Data Filtering Options**")
+                                
+                                query_type = st.radio(
+                                    "Choose extraction method:",
+                                    ["All Data", "Row Range", "Visual Query Builder", "Custom SQL"],
+                                    key=f"query_type_{table}",
+                                    horizontal=True
+                                )
+                                
+                                custom_query, limit, offset = None, None, None
+                                
+                                if query_type == "Row Range":
+                                    range_col1, range_col2 = st.columns(2)
+                                    with range_col1:
+                                        limit = st.number_input("Number of rows:", min_value=1, max_value=table_info['rows'], value=min(1000, table_info['rows']), key=f"limit_{table}")
+                                    with range_col2:
+                                        offset = st.number_input("Start from row (0-indexed):", min_value=0, max_value=max(0, table_info['rows']-1), value=0, key=f"offset_{table}")
+                                    st.info(f"Will extract rows from {offset} to {min(offset+limit-1, table_info['rows']-1)}")
+                                
+                                elif query_type == "Visual Query Builder":
+                                    custom_query = build_visual_query(table, table_info, st.session_state.db_type)
+                                    if custom_query:
+                                        st.markdown("**Generated SQL Query:**")
+                                        st.code(custom_query, language='sql')
+                                
+                                elif query_type == "Custom SQL":
+                                    if st.session_state.db_type == "PostgreSQL":
+                                        default_query = f'SELECT * FROM "{table}" WHERE '
+                                    elif st.session_state.db_type == "MySQL":
+                                        default_query = f"SELECT * FROM `{table}` WHERE "
+                                    else: # SQLite
+                                        default_query = f"SELECT * FROM [{table}] WHERE "
+                                    
+                                    custom_query = st.text_area("SQL Query:", value=default_query, height=100, key=f"custom_query_{table}", help="Only SELECT queries are allowed.")
+                                    if st.button(f"✅ Validate Query", key=f"validate_{table}"):
+                                        is_valid, message = db_connector.validate_query(custom_query)
+                                        if is_valid: st.success(f"✅ {message}")
+                                        else: st.error(f"❌ {message}")
+                                
+                                st.markdown("---")
+                                
+                                # Preview and Download Section
+                                if st.button(f"👁️ Preview Data & Download", key=f"preview_{table}"):
+                                    st.session_state.preview_table = table
+                                    st.session_state.preview_query_type = query_type
+                                    st.session_state.preview_custom_query = custom_query
+                                    st.session_state.preview_limit = limit
+                                    st.session_state.preview_offset = offset
+                                    st.rerun()
+
+                            else:
+                                st.error(f"Could not get table info for {table}")
+                        except Exception as e:
+                            st.error(f"Error processing table {table}: {e}")
+            
+            # Preview section (shown outside the expander)
+            if st.session_state.get('preview_table'):
+                st.markdown("---")
+                preview_table = st.session_state.preview_table
+                st.header(f"🔍 Preview & Download: **{preview_table}**")
+                
+                # Fetch data for preview (limited to 100 rows)
+                with st.spinner("Loading preview..."):
+                    try:
+                        query_type = st.session_state.get('preview_query_type', 'All Data')
+                        custom_query = st.session_state.get('preview_custom_query')
+                        
+                        preview_df = None
+                        if query_type in ["Custom SQL", "Visual Query Builder"] and custom_query:
+                            preview_query = custom_query
+                            if "limit" not in custom_query.lower():
+                                preview_query += " LIMIT 100"
+                            preview_df = db_connector.get_table_data(preview_table, custom_query=preview_query)
+                        elif query_type == "Row Range":
+                            limit = st.session_state.get('preview_limit')
+                            offset = st.session_state.get('preview_offset')
+                            preview_limit = min(limit, 100) if limit else 100
+                            preview_df = db_connector.get_table_data(preview_table, limit=preview_limit, offset=offset)
+                        else: # All Data
+                            preview_df = db_connector.get_table_data(preview_table, limit=100)
+
+                        if preview_df is not None:
+                            if st.button("❌ Close Preview"):
+                                for attr in ['preview_table', 'preview_query_type', 'preview_custom_query', 'preview_limit', 'preview_offset']:
+                                    if attr in st.session_state: del st.session_state[attr]
+                                st.rerun()
+                            
+                            st.dataframe(preview_df, use_container_width=True, height=400)
+                            
+                            # Download Full Dataset
+                            st.markdown("**Download Full Dataset:**")
+                            if st.button("Prepare Full Dataset for Download", type="primary"):
+                                with st.spinner("Preparing full dataset..."):
+                                    full_df = None
+                                    if query_type in ["Custom SQL", "Visual Query Builder"]:
+                                        full_df = db_connector.get_table_data(preview_table, custom_query=custom_query)
+                                    elif query_type == "Row Range":
+                                        full_df = db_connector.get_table_data(preview_table, limit=st.session_state.get('preview_limit'), offset=st.session_state.get('preview_offset'))
+                                    else: # All Data
+                                        full_df = db_connector.get_table_data(preview_table)
+                                    
+                                    if full_df is not None:
+                                        st.session_state.download_df = full_df
+                                        st.session_state.download_table_name = preview_table
+                                        st.success(f"Prepared {len(full_df):,} rows for download.")
+                                    else:
+                                        st.error("Failed to fetch full dataset.")
+
+                            if 'download_df' in st.session_state:
+                                dl_df = st.session_state.download_df
+                                dl_table = st.session_state.download_table_name
+                                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                
+                                dl_col1, dl_col2 = st.columns(2)
+                                with dl_col1:
+                                    st.download_button(
+                                        label=f"⬇️ Download CSV ({len(dl_df):,} rows)",
+                                        data=convert_df_to_csv(dl_df),
+                                        file_name=f"{dl_table}_{timestamp}.csv",
+                                        mime="text/csv",
+                                        use_container_width=True
+                                    )
+                                with dl_col2:
+                                    st.download_button(
+                                        label=f"⬇️ Download Excel ({len(dl_df):,} rows)",
+                                        data=convert_df_to_excel(dl_df),
+                                        file_name=f"{dl_table}_{timestamp}.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        use_container_width=True
+                                    )
+                        else:
+                            st.warning("Query returned no data to preview.")
+                    except Exception as e:
+                        st.error(f"Error loading preview data: {e}")
+
+        elif st.session_state.get('connected'):
+            st.warning("⚠️ No tables found in the database or connection lost. Please refresh or reconnect.")
     
     else:
-        # Welcome screen (update to mention multiple database support)
+        # Welcome screen
         st.markdown("""
-        ## 🚀 Welcome to Multi-Database Table Downloader!
+        ## 🚀 Welcome to the Multi-Database Downloader!
         
-        This app makes it easy to browse and download tables from multiple database types.
-        
-        ### 🎯 Supported Databases:
-        - **SQLite** (.db, .sqlite, .sqlite3 files)
-        - **PostgreSQL** (with psycopg2 or SQLAlchemy)
-        - **MySQL** (with mysql-connector-python or SQLAlchemy)
+        This app makes it easy to browse, filter, and download tables from multiple database types.
         
         ### ✨ Features:
-        - 🔌 **Multi-database support** - SQLite, PostgreSQL, MySQL
-        - 📁 **Flexible connections** - file upload, connection strings
-        - 📊 **Browse all tables** with detailed metadata
-        - 🔍 **Preview table data** before downloading
-        - 📥 **Multiple extraction options**
-        - 🎯 **Visual Query Builder** - point-and-click filtering
-        - 📥 **One-click downloads** in CSV or Excel format
+        - **Multi-database support**: SQLite, PostgreSQL, and MySQL.
+        - **Flexible connections**: Upload SQLite files or connect to remote servers.
+        - **Browse tables** with detailed metadata (row counts, columns).
+        - **Visual Query Builder**: Point-and-click to create complex filters without writing SQL.
+        - **Custom SQL**: For power users who want to write their own queries.
+        - **Data Preview**: See a sample of your data before committing to a full download.
+        - **One-click downloads** in both CSV and Excel formats.
         
+        ### 🛠️ Installation Requirements
+        For full functionality, please install the required libraries:
+        ```bash
+        pip install streamlit pandas sqlalchemy psycopg2-binary mysql-connector-python pymysql openpyxl
+        ```
+        
+        ---
         👈 **Get started by connecting to your database using the sidebar!**
         """)
 
