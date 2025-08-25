@@ -632,7 +632,7 @@ def render_database_connection_form():
         st.error("🔴 Not Connected")
 
 def build_visual_query(table_name, table_info, db_type="SQLite"):
-    """Build SQL query using visual interface (adapted for different databases)"""
+    """Build SQL query using visual interface (adapted for different databases) - FIXED VERSION"""
     st.markdown("### 🎯 **Visual Query Builder**")
     
     columns = [col[0] for col in table_info['column_info']]
@@ -675,10 +675,19 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
     col1, col2 = st.columns([1, 4])
     with col1:
         if st.button("➕ Add Filter", key=f"add_filter_{table_name}"):
+            # Initialize with proper default values based on first column type
+            first_col_type = column_types.get(columns[0], 'TEXT').upper()
+            if any(x in first_col_type for x in ['INT', 'SERIAL', 'BIGINT']):
+                default_value = 0
+            elif any(x in first_col_type for x in ['REAL', 'NUMERIC', 'DECIMAL', 'FLOAT', 'DOUBLE']):
+                default_value = 0.0
+            else:
+                default_value = ""
+            
             st.session_state[filter_key].append({
                 'column': columns[0],
                 'operator': 'equals (=)',
-                'value': '',
+                'value': default_value,
                 'logic': 'AND'
             })
             st.rerun()
@@ -714,6 +723,18 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
                     key=f"filter_col_{table_name}_{i}",
                     label_visibility="collapsed"
                 )
+                # Update the column in session state
+                old_column = st.session_state[filter_key][i]['column']
+                if column != old_column:
+                    # Reset value when column changes to match new column type
+                    new_col_type = column_types.get(column, 'TEXT').upper()
+                    if any(x in new_col_type for x in ['INT', 'SERIAL', 'BIGINT']):
+                        st.session_state[filter_key][i]['value'] = 0
+                    elif any(x in new_col_type for x in ['REAL', 'NUMERIC', 'DECIMAL', 'FLOAT', 'DOUBLE']):
+                        st.session_state[filter_key][i]['value'] = 0.0
+                    else:
+                        st.session_state[filter_key][i]['value'] = ""
+                
                 st.session_state[filter_key][i]['column'] = column
             
             with filter_col3:
@@ -737,13 +758,57 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
             
             with filter_col4:
                 if 'null' not in operator.lower():
-                    # Determine input type based on column data type
+                    # Get current value with proper type handling
+                    current_value = filter_item.get('value')
+                    
                     if any(x in col_type for x in ['INT', 'SERIAL', 'BIGINT']):
-                        value = st.number_input("Value", value=filter_item.get('value', 0), step=1, key=f"filter_val_{table_name}_{i}", label_visibility="collapsed")
+                        # Handle integer columns
+                        try:
+                            if current_value is None or current_value == '':
+                                default_val = 0
+                            else:
+                                default_val = int(current_value)
+                        except (ValueError, TypeError):
+                            default_val = 0
+                        
+                        value = st.number_input(
+                            "Value", 
+                            value=default_val, 
+                            step=1, 
+                            key=f"filter_val_{table_name}_{i}", 
+                            label_visibility="collapsed"
+                        )
                     elif any(x in col_type for x in ['REAL', 'NUMERIC', 'DECIMAL', 'FLOAT', 'DOUBLE']):
-                        value = st.number_input("Value", value=float(filter_item.get('value', 0.0)), format="%.4f", key=f"filter_val_{table_name}_{i}", label_visibility="collapsed")
+                        # Handle float columns
+                        try:
+                            if current_value is None or current_value == '':
+                                default_val = 0.0
+                            else:
+                                default_val = float(current_value)
+                        except (ValueError, TypeError):
+                            default_val = 0.0
+                        
+                        value = st.number_input(
+                            "Value", 
+                            value=default_val, 
+                            format="%.4f", 
+                            key=f"filter_val_{table_name}_{i}", 
+                            label_visibility="collapsed"
+                        )
                     else:
-                        value = st.text_input("Value", value=filter_item.get('value', ''), key=f"filter_val_{table_name}_{i}", label_visibility="collapsed", placeholder="Enter value...")
+                        # Handle text columns
+                        if current_value is None:
+                            default_val = ""
+                        else:
+                            default_val = str(current_value)
+                        
+                        value = st.text_input(
+                            "Value", 
+                            value=default_val, 
+                            key=f"filter_val_{table_name}_{i}", 
+                            label_visibility="collapsed", 
+                            placeholder="Enter value..."
+                        )
                     st.session_state[filter_key][i]['value'] = value
                 else:
                     st.write(" ") # Placeholder for alignment
@@ -820,7 +885,7 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
             safe_value = value.replace("'", "''") 
             quoted_value = f"'{safe_value}'"
         else:
-            quoted_value = value
+            quoted_value = str(value)
             
         condition = ""
         # Build condition based on operator
