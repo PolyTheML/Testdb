@@ -347,7 +347,24 @@ class MySQLConnector(DatabaseConnector):
                 st.error("MySQL dependencies not installed. Please install: pip install mysql-connector-python sqlalchemy pymysql")
                 return False
         except Exception as e:
-            st.error(f"Error connecting to MySQL database: {e}")
+            error_str = str(e).lower()
+            if "can't connect to mysql server" in error_str:
+                st.error("MySQL server connection failed. Please check:\n"
+                        "• MySQL server is running\n" 
+                        "• Host and port are correct\n"
+                        "• Network connectivity\n"
+                        "• Firewall settings")
+            elif "access denied" in error_str:
+                st.error("Access denied. Please verify:\n"
+                        "• Username and password are correct\n"
+                        "• User has privileges for this database\n"
+                        "• User has remote connection privileges (if not localhost)")
+            elif "unknown database" in error_str:
+                st.error("Database not found. Please check:\n"
+                        "• Database name is correct\n"
+                        "• You have access to this database")
+            else:
+                st.error(f"Error connecting to MySQL database: {e}")
             return False
     
     def get_tables(self):
@@ -468,7 +485,7 @@ def create_database_connector(db_type, **kwargs):
 
 def render_database_connection_form():
     """Render the database connection form in sidebar"""
-    st.header("🔌 Database Connection")
+    st.header("Database Connection")
     
     # Initialize session state variables if they don't exist
     if 'connected' not in st.session_state:
@@ -550,15 +567,167 @@ def render_database_connection_form():
     elif db_type == "MySQL":
         st.markdown("**MySQL Connection**")
         
+        # Connection method selection
+        connection_method = st.selectbox(
+            "Connection Method",
+            [
+                "Manual Configuration", 
+                "MySQL Workbench Connection", 
+                "Common Cloud Providers"
+            ],
+            key="mysql_connection_method"
+        )
+        
+        if connection_method == "MySQL Workbench Connection":
+            st.info(
+                "If you use MySQL Workbench, you can find these connection details in:\n"
+                "• Workbench → Database → Manage Connections\n"
+                "• Select your connection and view the parameters"
+            )
+            
+            # Show example of where to find connection details
+            with st.expander("How to find MySQL Workbench connection details"):
+                st.markdown("""
+                **Step-by-step guide:**
+                1. Open MySQL Workbench
+                2. Click on "Database" in the menu
+                3. Select "Manage Connections..."
+                4. Choose your connection from the list
+                5. Copy the connection parameters:
+                   - **Hostname**: Usually shown as "Hostname"
+                   - **Port**: Default is 3306
+                   - **Schema**: Your database name
+                   - **Username**: Your MySQL username
+                6. Use these values in the form below
+                
+                **Note**: The password is not stored in Workbench for security reasons.
+                """)
+        
+        elif connection_method == "Common Cloud Providers":
+            cloud_provider = st.selectbox(
+                "Cloud Provider",
+                ["AWS RDS", "Google Cloud SQL", "Azure Database", "Other"],
+                key="cloud_provider"
+            )
+            
+            if cloud_provider == "AWS RDS":
+                st.info("For AWS RDS, use your RDS endpoint as hostname (e.g., mydb.xyz.rds.amazonaws.com)")
+            elif cloud_provider == "Google Cloud SQL":
+                st.info("For Google Cloud SQL, use the public IP or connection name")
+            elif cloud_provider == "Azure Database":
+                st.info("For Azure, use your server name (e.g., myserver.mysql.database.azure.com)")
+        
+        # Connection form (same for all methods)
         col1, col2 = st.columns(2)
         with col1:
-            host = st.text_input("Host", value="localhost", placeholder="localhost", key="mysql_host")
-            database = st.text_input("Database", placeholder="mydb", key="mysql_db")
+            host = st.text_input(
+                "Host/Hostname", 
+                value="localhost", 
+                placeholder="localhost or server IP/domain",
+                key="mysql_host",
+                help="Server address (localhost for local MySQL, or remote server address)"
+            )
+            database = st.text_input(
+                "Database/Schema", 
+                placeholder="database_name",
+                key="mysql_db",
+                help="Name of the database/schema you want to connect to"
+            )
         with col2:
-            port = st.number_input("Port", min_value=1, max_value=65535, value=3306, key="mysql_port")
-            username = st.text_input("Username", placeholder="root", key="mysql_user")
+            port = st.number_input(
+                "Port", 
+                min_value=1, 
+                max_value=65535, 
+                value=3306,
+                key="mysql_port",
+                help="MySQL server port (default: 3306)"
+            )
+            username = st.text_input(
+                "Username", 
+                placeholder="root or your username",
+                key="mysql_user",
+                help="MySQL username with access to the database"
+            )
         
-        password = st.text_input("Password", type="password", key="mysql_pass")
+        password = st.text_input(
+            "Password", 
+            type="password",
+            key="mysql_pass",
+            help="MySQL password for the username above"
+        )
+        
+        # Connection testing and troubleshooting
+        with st.expander("Connection Troubleshooting"):
+            st.markdown("""
+            **Common Issues & Solutions:**
+            
+            **"Can't connect to MySQL server"**
+            - Ensure MySQL server is running
+            - Check if host/port are correct
+            - Verify firewall isn't blocking the connection
+            
+            **"Access denied for user"**
+            - Check username/password are correct
+            - Ensure user has privileges for the database
+            - For remote connections, user must have remote access enabled
+            
+            **"Unknown database"**
+            - Verify the database name exists
+            - Check if you have access to that specific database
+            
+            **For Local MySQL (localhost):**
+            - Install MySQL Server (not just Workbench)
+            - Start MySQL service: `sudo systemctl start mysql` (Linux) or use Services (Windows)
+            - Default username is usually 'root'
+            
+            **For Remote MySQL:**
+            - Get connection details from your database administrator
+            - Ensure your IP is whitelisted for remote access
+            - Use the correct hostname (not localhost)
+            """)
+        
+        # Test connection button (separate from main connect)
+        if st.button("Test Connection Parameters", key="test_mysql"):
+            if not all([host, database, username]):
+                st.error("Please fill in Host, Database, and Username to test connection")
+            else:
+                test_connector_params = {
+                    'host': host,
+                    'port': port,
+                    'database': database,
+                    'username': username,
+                    'password': password
+                }
+                
+                with st.spinner("Testing connection..."):
+                    try:
+                        test_connector = MySQLConnector(**test_connector_params)
+                        if test_connector.connect():
+                            st.success("Connection test successful!")
+                            test_connector.disconnect()
+                        else:
+                            st.error("Connection test failed")
+                    except Exception as e:
+                        st.error(f"Connection test failed: {e}")
+                        
+                        # Provide specific guidance based on error type
+                        error_str = str(e).lower()
+                        if "can't connect" in error_str:
+                            st.warning(
+                                "**Suggestion**: Check if MySQL server is running and "
+                                "the host/port are correct. For localhost, ensure MySQL "
+                                "server is installed and started."
+                            )
+                        elif "access denied" in error_str:
+                            st.warning(
+                                "**Suggestion**: Verify your username and password. "
+                                "For remote connections, ensure the user has remote access privileges."
+                            )
+                        elif "unknown database" in error_str:
+                            st.warning(
+                                "**Suggestion**: Check if the database name is correct "
+                                "and you have access to it."
+                            )
         
         connector_params = {
             'host': host,
@@ -569,7 +738,7 @@ def render_database_connection_form():
         }
     
     # Connect button
-    if st.button("🔗 Connect to Database", type="primary"):
+    if st.button("Connect to Database", type="primary"):
         # Validate required fields
         if db_type == "SQLite" and not connector_params.get('db_path'):
             st.error("Please provide a database file or path")
@@ -596,7 +765,7 @@ def render_database_connection_form():
                     else:
                         db_name = f"{connector_params['database']}@{connector_params['host']}"
                     
-                    st.success(f"✅ Connected to: {db_name}")
+                    st.success(f"Connected to: {db_name}")
                     st.rerun()
                 else:
                     st.session_state.connected = False
@@ -606,7 +775,7 @@ def render_database_connection_form():
     
     # Connection status
     if st.session_state.connected:
-        st.success("🟢 Connected")
+        st.success("Connected")
         
         # Show connection info
         if st.session_state.db_type == "SQLite":
@@ -616,10 +785,10 @@ def render_database_connection_form():
             params = st.session_state.connector_params
             st.info(f"**{st.session_state.db_type}**: {params.get('database', 'Unknown')} @ {params.get('host', 'Unknown')}:{params.get('port', 'Unknown')}")
         
-        if st.button("🔄 Refresh Tables"):
+        if st.button("Refresh Tables"):
             st.rerun()
             
-        if st.button("❌ Disconnect"):
+        if st.button("Disconnect"):
             if st.session_state.db_connector:
                 st.session_state.db_connector.disconnect()
             
@@ -629,11 +798,11 @@ def render_database_connection_form():
             
             st.rerun()
     else:
-        st.error("🔴 Not Connected")
+        st.error("Not Connected")
 
 def build_visual_query(table_name, table_info, db_type="SQLite"):
-    """Build SQL query using visual interface (adapted for different databases) - FIXED VERSION"""
-    st.markdown("### 🎯 **Visual Query Builder**")
+    """Build SQL query using visual interface (adapted for different databases)"""
+    st.markdown("### Visual Query Builder")
     
     columns = [col[0] for col in table_info['column_info']]
     column_types = {col[0]: col[1] for col in table_info['column_info']}
@@ -652,7 +821,7 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
     selected_columns = []
     if col_selection_type == "All Columns":
         selected_columns = columns
-        st.info(f"✅ All {len(columns)} columns selected")
+        st.info(f"All {len(columns)} columns selected")
     else:
         selected_columns = st.multiselect(
             "Choose columns:",
@@ -661,7 +830,7 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
             key=f"cols_{table_name}"
         )
         if not selected_columns:
-            st.warning("⚠️ Please select at least one column")
+            st.warning("Please select at least one column")
             return None
 
     # 2. Filters Section
@@ -674,7 +843,7 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
     # Add/Clear filter buttons
     col1, col2 = st.columns([1, 4])
     with col1:
-        if st.button("➕ Add Filter", key=f"add_filter_{table_name}"):
+        if st.button("Add Filter", key=f"add_filter_{table_name}"):
             # Initialize with proper default values based on first column type
             first_col_type = column_types.get(columns[0], 'TEXT').upper()
             if any(x in first_col_type for x in ['INT', 'SERIAL', 'BIGINT']):
@@ -693,7 +862,7 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
             st.rerun()
     
     with col2:
-        if st.session_state[filter_key] and st.button("🗑️ Clear All Filters", key=f"clear_filters_{table_name}"):
+        if st.session_state[filter_key] and st.button("Clear All Filters", key=f"clear_filters_{table_name}"):
             st.session_state[filter_key] = []
             st.rerun()
     
@@ -814,7 +983,7 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
                     st.write(" ") # Placeholder for alignment
 
             with filter_col5:
-                if st.button("❌", key=f"remove_filter_{table_name}_{i}", help="Remove this filter"):
+                if st.button("X", key=f"remove_filter_{table_name}_{i}", help="Remove this filter"):
                     st.session_state[filter_key].pop(i)
                     st.rerun()
 
@@ -953,16 +1122,16 @@ def convert_df_to_excel(df):
 def main():
     st.set_page_config(
         page_title="Multi-Database Table Downloader",
-        page_icon="🗃️",
+        page_icon="Database",
         layout="wide"
     )
     
-    st.title("🗃️ Multi-Database Table Downloader")
+    st.title("Multi-Database Table Downloader")
     st.markdown("Connect to SQLite, PostgreSQL, or MySQL databases and download tables with a visual query builder!")
     
     # Show installation instructions if dependencies are missing
     if not (POSTGRES_AVAILABLE or MYSQL_AVAILABLE or SQLALCHEMY_AVAILABLE):
-        st.warning("⚠️ **Missing Dependencies**: To use PostgreSQL or MySQL, install: `pip install sqlalchemy psycopg2-binary mysql-connector-python pymysql`")
+        st.warning("Missing Dependencies: To use PostgreSQL or MySQL, install: `pip install sqlalchemy psycopg2-binary mysql-connector-python pymysql`")
     
     # Sidebar for database connection
     with st.sidebar:
@@ -981,10 +1150,10 @@ def main():
             tables = []
         
         if tables:
-            st.header(f"📋 Available Tables ({len(tables)} total)")
+            st.header(f"Available Tables ({len(tables)} total)")
             
             # Search/filter tables
-            search_term = st.text_input("🔍 Search tables:", placeholder="Enter table name...")
+            search_term = st.text_input("Search tables:", placeholder="Enter table name...")
             if search_term:
                 filtered_tables = [table for table in tables if search_term.lower() in table.lower()]
             else:
@@ -995,7 +1164,7 @@ def main():
             else:
                 # Display tables in expandable sections
                 for table in filtered_tables:
-                    with st.expander(f"📊 **{table}**", expanded=False):
+                    with st.expander(f"**{table}**", expanded=False):
                         try:
                             table_info = db_connector.get_table_info(table)
                             
@@ -1007,7 +1176,7 @@ def main():
                                 with info_col2:
                                     st.metric("Columns", table_info['columns'])
                                 with info_col3:
-                                    if st.button(f"📋 Show Columns", key=f"show_cols_btn_{table}"):
+                                    if st.button(f"Show Columns", key=f"show_cols_btn_{table}"):
                                         key = f"show_cols_state_{table}"
                                         st.session_state[key] = not st.session_state.get(key, False)
                                 
@@ -1022,7 +1191,7 @@ def main():
                                 st.markdown("---")
                                 
                                 # Query Options Section
-                                st.markdown("### 🔍 **Data Filtering Options**")
+                                st.markdown("### Data Filtering Options")
                                 
                                 query_type = st.radio(
                                     "Choose extraction method:",
@@ -1056,15 +1225,15 @@ def main():
                                         default_query = f"SELECT * FROM [{table}] WHERE "
                                     
                                     custom_query = st.text_area("SQL Query:", value=default_query, height=100, key=f"custom_query_{table}", help="Only SELECT queries are allowed.")
-                                    if st.button(f"✅ Validate Query", key=f"validate_{table}"):
+                                    if st.button(f"Validate Query", key=f"validate_{table}"):
                                         is_valid, message = db_connector.validate_query(custom_query)
-                                        if is_valid: st.success(f"✅ {message}")
-                                        else: st.error(f"❌ {message}")
+                                        if is_valid: st.success(f"{message}")
+                                        else: st.error(f"{message}")
                                 
                                 st.markdown("---")
                                 
                                 # Preview and Download Section
-                                if st.button(f"👁️ Preview Data & Download", key=f"preview_{table}"):
+                                if st.button(f"Preview Data & Download", key=f"preview_{table}"):
                                     st.session_state.preview_table = table
                                     st.session_state.preview_query_type = query_type
                                     st.session_state.preview_custom_query = custom_query
@@ -1081,7 +1250,7 @@ def main():
             if st.session_state.get('preview_table'):
                 st.markdown("---")
                 preview_table = st.session_state.preview_table
-                st.header(f"🔍 Preview & Download: **{preview_table}**")
+                st.header(f"Preview & Download: **{preview_table}**")
                 
                 # Fetch data for preview (limited to 100 rows)
                 with st.spinner("Loading preview..."):
@@ -1104,7 +1273,7 @@ def main():
                             preview_df = db_connector.get_table_data(preview_table, limit=100)
 
                         if preview_df is not None:
-                            if st.button("❌ Close Preview"):
+                            if st.button("Close Preview"):
                                 for attr in ['preview_table', 'preview_query_type', 'preview_custom_query', 'preview_limit', 'preview_offset']:
                                     if attr in st.session_state: del st.session_state[attr]
                                 st.rerun()
@@ -1138,7 +1307,7 @@ def main():
                                 dl_col1, dl_col2 = st.columns(2)
                                 with dl_col1:
                                     st.download_button(
-                                        label=f"⬇️ Download CSV ({len(dl_df):,} rows)",
+                                        label=f"Download CSV ({len(dl_df):,} rows)",
                                         data=convert_df_to_csv(dl_df),
                                         file_name=f"{dl_table}_{timestamp}.csv",
                                         mime="text/csv",
@@ -1146,7 +1315,7 @@ def main():
                                     )
                                 with dl_col2:
                                     st.download_button(
-                                        label=f"⬇️ Download Excel ({len(dl_df):,} rows)",
+                                        label=f"Download Excel ({len(dl_df):,} rows)",
                                         data=convert_df_to_excel(dl_df),
                                         file_name=f"{dl_table}_{timestamp}.xlsx",
                                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1158,16 +1327,16 @@ def main():
                         st.error(f"Error loading preview data: {e}")
 
         elif st.session_state.get('connected'):
-            st.warning("⚠️ No tables found in the database or connection lost. Please refresh or reconnect.")
+            st.warning("No tables found in the database or connection lost. Please refresh or reconnect.")
     
     else:
         # Welcome screen
         st.markdown("""
-        ## 🚀 Welcome to the Multi-Database Downloader!
+        ## Welcome to the Multi-Database Downloader!
         
         This app makes it easy to browse, filter, and download tables from multiple database types.
         
-        ### ✨ Features:
+        ### Features:
         - **Multi-database support**: SQLite, PostgreSQL, and MySQL.
         - **Flexible connections**: Upload SQLite files or connect to remote servers.
         - **Browse tables** with detailed metadata (row counts, columns).
@@ -1176,14 +1345,14 @@ def main():
         - **Data Preview**: See a sample of your data before committing to a full download.
         - **One-click downloads** in both CSV and Excel formats.
         
-        ### 🛠️ Installation Requirements
+        ### Installation Requirements
         For full functionality, please install the required libraries:
         ```bash
         pip install streamlit pandas sqlalchemy psycopg2-binary mysql-connector-python pymysql openpyxl
         ```
         
         ---
-        👈 **Get started by connecting to your database using the sidebar!**
+        **Get started by connecting to your database using the sidebar!**
         """)
 
 if __name__ == "__main__":
