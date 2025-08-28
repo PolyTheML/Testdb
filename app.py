@@ -5,16 +5,12 @@ import io
 from datetime import datetime
 import os
 from abc import ABC, abstractmethod
+import time
 
 # Try to import additional database drivers
 try:
-    import psycopg2
-    POSTGRES_AVAILABLE = True
-except ImportError:
-    POSTGRES_AVAILABLE = False
-
-try:
     import mysql.connector
+    from mysql.connector import Error as MySQLError
     MYSQL_AVAILABLE = True
 except ImportError:
     MYSQL_AVAILABLE = False
@@ -61,9 +57,15 @@ class DatabaseConnector(ABC):
     def disconnect(self):
         """Disconnect from database"""
         if self.connection:
-            self.connection.close()
+            try:
+                self.connection.close()
+            except:
+                pass
         if self.engine:
-            self.engine.dispose()
+            try:
+                self.engine.dispose()
+            except:
+                pass
 
 class SQLiteConnector(DatabaseConnector):
     def __init__(self, db_path):
@@ -168,204 +170,171 @@ class SQLiteConnector(DatabaseConnector):
             st.error(f"Error getting table info for {table_name}: {e}")
             return None
 
-class PostgreSQLConnector(DatabaseConnector):
-    def __init__(self, host, port, database, username, password):
-        super().__init__()
-        self.host = host
-        self.port = port
-        self.database = database
-        self.username = username
-        self.password = password
-        
-    def connect(self, **kwargs):
-        """Test connection to PostgreSQL database"""
-        try:
-            if SQLALCHEMY_AVAILABLE:
-                # Use SQLAlchemy for better compatibility
-                connection_string = f"postgresql://{self.username}:{urllib.parse.quote_plus(self.password)}@{self.host}:{self.port}/{self.database}"
-                self.engine = create_engine(connection_string)
-                # Test connection
-                with self.engine.connect() as conn:
-                    conn.execute(text("SELECT 1"))
-                return True
-            elif POSTGRES_AVAILABLE:
-                # Fallback to psycopg2
-                self.connection = psycopg2.connect(
-                    host=self.host,
-                    port=self.port,
-                    database=self.database,
-                    user=self.username,
-                    password=self.password
-                )
-                self.connection.close()
-                return True
-            else:
-                st.error("PostgreSQL dependencies not installed. Please install: pip install psycopg2-binary sqlalchemy")
-                return False
-        except Exception as e:
-            st.error(f"Error connecting to PostgreSQL database: {e}")
-            return False
-    
-    def get_tables(self):
-        """Get list of tables in the PostgreSQL database"""
-        try:
-            if self.engine:
-                inspector = inspect(self.engine)
-                return inspector.get_table_names()
-            else:
-                # Fallback method
-                query = """
-                SELECT table_name 
-                FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                ORDER BY table_name
-                """
-                df = pd.read_sql_query(query, self.connection)
-                return df['table_name'].tolist()
-        except Exception as e:
-            st.error(f"Error fetching tables: {e}")
-            return []
-    
-    def get_table_data(self, table_name, custom_query=None, limit=None, offset=None):
-        """Get data from a specific table with optional filtering"""
-        try:
-            if custom_query:
-                query = custom_query
-            else:
-                query = f'SELECT * FROM "{table_name}"'
-                if limit:
-                    query += f" LIMIT {limit}"
-                    if offset:
-                        query += f" OFFSET {offset}"
-            
-            if self.engine:
-                df = pd.read_sql_query(query, self.engine)
-            else:
-                df = pd.read_sql_query(query, self.connection)
-            return df
-        except Exception as e:
-            st.error(f"Error fetching data: {e}")
-            return None
-    
-    def validate_query(self, query):
-        """Validate that query is safe"""
-        try:
-            query_lower = query.lower().strip()
-            
-            if not query_lower.startswith('select'):
-                return False, "Query must start with SELECT"
-            
-            prohibited = ['insert', 'update', 'delete', 'drop', 'create', 'alter', 'truncate']
-            for word in prohibited:
-                if word in query_lower:
-                    return False, f"'{word.upper()}' operations are not allowed"
-            
-            # Test query with EXPLAIN
-            if self.engine:
-                with self.engine.connect() as conn:
-                    conn.execute(text(f"EXPLAIN {query}"))
-            return True, "Query is valid"
-        except Exception as e:
-            return False, f"Query error: {str(e)}"
-    
-    def get_table_info(self, table_name):
-        """Get basic info about a table"""
-        try:
-            # Get row count
-            count_query = f'SELECT COUNT(*) FROM "{table_name}"'
-            if self.engine:
-                with self.engine.connect() as conn:
-                    result = conn.execute(text(count_query))
-                    row_count = result.scalar()
-            else:
-                df = pd.read_sql_query(count_query, self.connection)
-                row_count = df.iloc[0, 0]
-            
-            # Get column info
-            info_query = """
-            SELECT column_name, data_type 
-            FROM information_schema.columns 
-            WHERE table_name = %s 
-            ORDER BY ordinal_position
-            """
-            if self.engine:
-                df = pd.read_sql_query(info_query, self.engine, params=[table_name])
-            else:
-                df = pd.read_sql_query(info_query, self.connection, params=[table_name])
-            
-            columns = [(row['column_name'], row['data_type']) for _, row in df.iterrows()]
-            
-            return {
-                'rows': row_count,
-                'columns': len(columns),
-                'column_info': columns
-            }
-        except Exception as e:
-            st.error(f"Error getting table info for {table_name}: {e}")
-            return None
-
 class MySQLConnector(DatabaseConnector):
-    def __init__(self, host, port, database, username, password):
+    def __init__(self, host, port, database, username, password, 
+                 connection_timeout=10, autocommit=True, charset='utf8mb4',
+                 ssl_disabled=True, auth_plugin=None):
         super().__init__()
         self.host = host
         self.port = port
         self.database = database
         self.username = username
         self.password = password
+        self.connection_timeout = connection_timeout
+        self.autocommit = autocommit
+        self.charset = charset
+        self.ssl_disabled = ssl_disabled
+        self.auth_plugin = auth_plugin
         
     def connect(self, **kwargs):
-        """Test connection to MySQL database"""
+        """Test connection to MySQL database with improved error handling"""
         try:
-            if SQLALCHEMY_AVAILABLE:
-                # Use SQLAlchemy for better compatibility
-                connection_string = f"mysql+pymysql://{self.username}:{urllib.parse.quote_plus(self.password)}@{self.host}:{self.port}/{self.database}"
-                self.engine = create_engine(connection_string)
-                # Test connection
-                with self.engine.connect() as conn:
-                    conn.execute(text("SELECT 1"))
-                return True
-            elif MYSQL_AVAILABLE:
-                # Fallback to mysql-connector-python
-                self.connection = mysql.connector.connect(
-                    host=self.host,
-                    port=self.port,
-                    database=self.database,
-                    user=self.username,
-                    password=self.password
-                )
-                self.connection.close() # Close test connection
-                # Re-establish connection for operations
-                self.connection = mysql.connector.connect(
-                    host=self.host,
-                    port=self.port,
-                    database=self.database,
-                    user=self.username,
-                    password=self.password
-                )
-                return True
+            if MYSQL_AVAILABLE:
+                # Build connection configuration
+                config = {
+                    'host': self.host,
+                    'port': int(self.port),
+                    'database': self.database,
+                    'user': self.username,
+                    'password': self.password,
+                    'connection_timeout': self.connection_timeout,
+                    'autocommit': self.autocommit,
+                    'charset': self.charset,
+                    'use_unicode': True,
+                    'raise_on_warnings': False
+                }
+                
+                # Add SSL configuration if disabled
+                if self.ssl_disabled:
+                    config['ssl_disabled'] = True
+                
+                # Add auth plugin if specified
+                if self.auth_plugin:
+                    config['auth_plugin'] = self.auth_plugin
+                
+                # Test connection with timeout
+                try:
+                    test_conn = mysql.connector.connect(**config)
+                    
+                    # Test if we can actually query
+                    cursor = test_conn.cursor()
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+                    cursor.close()
+                    test_conn.close()
+                    
+                    # Store successful connection config for reuse
+                    self.connection_config = config
+                    return True
+                    
+                except MySQLError as mysql_err:
+                    # Handle specific MySQL errors with helpful messages
+                    error_code = getattr(mysql_err, 'errno', None)
+                    error_msg = str(mysql_err)
+                    
+                    if error_code == 2003:  # Can't connect to MySQL server
+                        st.error(f"🔌 Connection Failed (Error 2003)")
+                        st.markdown("""
+                        **Possible Solutions:**
+                        - Verify MySQL server is running on `{}`
+                        - Check if port `{}` is correct (standard is 3306)
+                        - Ensure firewall allows connections to this port
+                        - For cloud databases, check security groups/firewall rules
+                        """.format(self.host, self.port))
+                        
+                    elif error_code == 1045:  # Access denied
+                        st.error(f"🚫 Access Denied (Error 1045)")
+                        st.markdown("""
+                        **Possible Solutions:**
+                        - Double-check username and password
+                        - Ensure user has database privileges: `GRANT ALL ON {}.* TO '{}'@'%'`
+                        - For remote connections, user needs host permissions
+                        - Try connecting from MySQL command line first
+                        """.format(self.database, self.username))
+                        
+                    elif error_code == 1049:  # Unknown database
+                        st.error(f"🗄️ Database Not Found (Error 1049)")
+                        st.markdown("""
+                        **Possible Solutions:**
+                        - Verify database name '{}' exists
+                        - Check if you have access to this specific database
+                        - List databases with: `SHOW DATABASES;`
+                        """.format(self.database))
+                        
+                    elif error_code == 2005:  # Unknown host
+                        st.error(f"🌐 Host Not Found (Error 2005)")
+                        st.markdown("""
+                        **Possible Solutions:**
+                        - Check if hostname '{}' is correct
+                        - Try using IP address instead of hostname
+                        - Verify DNS resolution
+                        """.format(self.host))
+                        
+                    elif error_code == 1251:  # Client authentication protocol issue
+                        st.error(f"🔐 Authentication Protocol Issue (Error 1251)")
+                        st.markdown("""
+                        **Solution:**
+                        - This is often caused by newer MySQL versions using `caching_sha2_password`
+                        - Try enabling 'mysql_native_password' authentication below
+                        - Or update user authentication: `ALTER USER '{}'@'%' IDENTIFIED WITH mysql_native_password BY 'your_password';`
+                        """.format(self.username))
+                        
+                    else:
+                        st.error(f"MySQL Error {error_code}: {error_msg}")
+                    
+                    return False
+                    
+            elif SQLALCHEMY_AVAILABLE:
+                # Fallback to SQLAlchemy with PyMySQL
+                try:
+                    # URL encode password to handle special characters
+                    encoded_password = urllib.parse.quote_plus(self.password)
+                    connection_string = f"mysql+pymysql://{self.username}:{encoded_password}@{self.host}:{self.port}/{self.database}"
+                    
+                    # Add connection parameters for better compatibility
+                    connection_string += "?charset=utf8mb4"
+                    if self.ssl_disabled:
+                        connection_string += "&ssl_disabled=true"
+                    
+                    self.engine = create_engine(
+                        connection_string, 
+                        connect_args={
+                            'connect_timeout': self.connection_timeout,
+                        }
+                    )
+                    
+                    # Test connection
+                    with self.engine.connect() as conn:
+                        conn.execute(text("SELECT 1"))
+                    return True
+                    
+                except Exception as sqlalchemy_err:
+                    st.error(f"SQLAlchemy connection failed: {sqlalchemy_err}")
+                    return False
             else:
                 st.error("MySQL dependencies not installed. Please install: pip install mysql-connector-python sqlalchemy pymysql")
                 return False
+                
         except Exception as e:
-            error_str = str(e).lower()
-            if "can't connect to mysql server" in error_str:
-                st.error("MySQL server connection failed. Please check:\n"
-                        "• MySQL server is running\n" 
-                        "• Host and port are correct\n"
-                        "• Network connectivity\n"
-                        "• Firewall settings")
-            elif "access denied" in error_str:
-                st.error("Access denied. Please verify:\n"
-                        "• Username and password are correct\n"
-                        "• User has privileges for this database\n"
-                        "• User has remote connection privileges (if not localhost)")
-            elif "unknown database" in error_str:
-                st.error("Database not found. Please check:\n"
-                        "• Database name is correct\n"
-                        "• You have access to this database")
-            else:
-                st.error(f"Error connecting to MySQL database: {e}")
+            st.error(f"Unexpected error connecting to MySQL: {e}")
             return False
+    
+    def _get_connection(self):
+        """Get a fresh MySQL connection"""
+        if hasattr(self, 'connection_config'):
+            return mysql.connector.connect(**self.connection_config)
+        else:
+            # Fallback configuration
+            return mysql.connector.connect(
+                host=self.host,
+                port=int(self.port),
+                database=self.database,
+                user=self.username,
+                password=self.password,
+                connection_timeout=self.connection_timeout,
+                autocommit=self.autocommit,
+                charset=self.charset
+            )
     
     def get_tables(self):
         """Get list of tables in the MySQL database"""
@@ -374,11 +343,12 @@ class MySQLConnector(DatabaseConnector):
                 inspector = inspect(self.engine)
                 return inspector.get_table_names()
             else:
-                query = "SHOW TABLES"
-                cursor = self.connection.cursor()
-                cursor.execute(query)
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SHOW TABLES")
                 tables = [row[0] for row in cursor.fetchall()]
                 cursor.close()
+                conn.close()
                 return tables
         except Exception as e:
             st.error(f"Error fetching tables: {e}")
@@ -399,7 +369,9 @@ class MySQLConnector(DatabaseConnector):
             if self.engine:
                 df = pd.read_sql_query(query, self.engine)
             else:
-                df = pd.read_sql_query(query, self.connection)
+                conn = self._get_connection()
+                df = pd.read_sql_query(query, conn)
+                conn.close()
             return df
         except Exception as e:
             st.error(f"Error fetching data: {e}")
@@ -423,10 +395,12 @@ class MySQLConnector(DatabaseConnector):
                 with self.engine.connect() as conn:
                     conn.execute(text(f"EXPLAIN {query}"))
             else:
-                 cursor = self.connection.cursor()
-                 cursor.execute(f"EXPLAIN {query}")
-                 cursor.fetchall()
-                 cursor.close()
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                cursor.execute(f"EXPLAIN {query}")
+                cursor.fetchall()
+                cursor.close()
+                conn.close()
             return True, "Query is valid"
         except Exception as e:
             return False, f"Query error: {str(e)}"
@@ -441,10 +415,12 @@ class MySQLConnector(DatabaseConnector):
                     result = conn.execute(text(count_query))
                     row_count = result.scalar()
             else:
-                cursor = self.connection.cursor()
+                conn = self._get_connection()
+                cursor = conn.cursor()
                 cursor.execute(count_query)
                 row_count = cursor.fetchone()[0]
                 cursor.close()
+                conn.close()
             
             # Get column info
             if self.engine:
@@ -452,10 +428,12 @@ class MySQLConnector(DatabaseConnector):
                 df = pd.read_sql_query(info_query, self.engine)
                 columns = [(row['Field'], row['Type']) for _, row in df.iterrows()]
             else:
-                cursor = self.connection.cursor()
+                conn = self._get_connection()
+                cursor = conn.cursor()
                 cursor.execute(f"DESCRIBE `{table_name}`")
                 columns = [(row[0], row[1]) for row in cursor.fetchall()]
                 cursor.close()
+                conn.close()
             
             return {
                 'rows': row_count,
@@ -470,15 +448,13 @@ def create_database_connector(db_type, **kwargs):
     """Factory function to create appropriate database connector"""
     if db_type == "SQLite":
         return SQLiteConnector(kwargs['db_path'])
-    elif db_type == "PostgreSQL":
-        return PostgreSQLConnector(
-            kwargs['host'], kwargs['port'], kwargs['database'], 
-            kwargs['username'], kwargs['password']
-        )
     elif db_type == "MySQL":
         return MySQLConnector(
             kwargs['host'], kwargs['port'], kwargs['database'], 
-            kwargs['username'], kwargs['password']
+            kwargs['username'], kwargs['password'],
+            connection_timeout=kwargs.get('connection_timeout', 10),
+            ssl_disabled=kwargs.get('ssl_disabled', True),
+            auth_plugin=kwargs.get('auth_plugin', None)
         )
     else:
         raise ValueError(f"Unsupported database type: {db_type}")
@@ -499,8 +475,6 @@ def render_database_connection_form():
     
     # Database type selection
     available_types = ["SQLite"]
-    if POSTGRES_AVAILABLE or SQLALCHEMY_AVAILABLE:
-        available_types.append("PostgreSQL")
     if MYSQL_AVAILABLE or SQLALCHEMY_AVAILABLE:
         available_types.append("MySQL")
     
@@ -542,27 +516,6 @@ def render_database_connection_form():
             db_path = temp_db_path
         
         connector_params = {'db_path': db_path}
-    
-    elif db_type == "PostgreSQL":
-        st.markdown("**PostgreSQL Connection**")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            host = st.text_input("Host", value="localhost", placeholder="localhost")
-            database = st.text_input("Database", placeholder="mydb")
-        with col2:
-            port = st.number_input("Port", min_value=1, max_value=65535, value=5432)
-            username = st.text_input("Username", placeholder="postgres")
-        
-        password = st.text_input("Password", type="password")
-        
-        connector_params = {
-            'host': host,
-            'port': port,
-            'database': database,
-            'username': username,
-            'password': password
-        }
     
     elif db_type == "MySQL":
         st.markdown("**MySQL Connection**")
@@ -656,38 +609,77 @@ def render_database_connection_form():
             help="MySQL password for the username above"
         )
         
+        # Advanced connection options
+        with st.expander("🔧 Advanced Connection Options"):
+            col1_adv, col2_adv = st.columns(2)
+            
+            with col1_adv:
+                connection_timeout = st.number_input(
+                    "Connection Timeout (seconds)", 
+                    min_value=5, 
+                    max_value=60, 
+                    value=10,
+                    help="How long to wait for connection before timeout"
+                )
+                
+                ssl_disabled = st.checkbox(
+                    "Disable SSL", 
+                    value=True,
+                    help="Check this if you're getting SSL errors (common for local MySQL)"
+                )
+            
+            with col2_adv:
+                auth_plugin = st.selectbox(
+                    "Authentication Plugin",
+                    [None, "mysql_native_password", "caching_sha2_password"],
+                    format_func=lambda x: "Auto-detect" if x is None else x,
+                    help="Choose specific auth plugin if having authentication issues"
+                )
+                
+                charset = st.selectbox(
+                    "Character Set",
+                    ["utf8mb4", "utf8", "latin1"],
+                    help="Database character encoding (utf8mb4 recommended)"
+                )
+        
         # Connection testing and troubleshooting
-        with st.expander("Connection Troubleshooting"):
+        with st.expander("🔍 Connection Troubleshooting Guide"):
             st.markdown("""
-            **Common Issues & Solutions:**
+            **Pre-connection Checklist:**
             
-            **"Can't connect to MySQL server"**
-            - Ensure MySQL server is running
-            - Check if host/port are correct
-            - Verify firewall isn't blocking the connection
+            ✅ **Local MySQL Setup:**
+            1. Install MySQL Server (not just Workbench)
+            2. Start MySQL service:
+               - Windows: Services → MySQL → Start
+               - macOS: System Preferences → MySQL → Start
+               - Linux: `sudo systemctl start mysql`
+            3. Test with command line: `mysql -u root -p`
             
-            **"Access denied for user"**
-            - Check username/password are correct
-            - Ensure user has privileges for the database
-            - For remote connections, user must have remote access enabled
+            ✅ **Remote MySQL Setup:**
+            1. Get correct connection details from your admin/provider
+            2. Ensure your IP is whitelisted
+            3. Check firewall rules (port 3306 typically)
+            4. Verify user has remote connection privileges
             
-            **"Unknown database"**
-            - Verify the database name exists
-            - Check if you have access to that specific database
+            ✅ **Common MySQL Commands for Setup:**
+            ```sql
+            -- Create database
+            CREATE DATABASE your_database_name;
             
-            **For Local MySQL (localhost):**
-            - Install MySQL Server (not just Workbench)
-            - Start MySQL service: `sudo systemctl start mysql` (Linux) or use Services (Windows)
-            - Default username is usually 'root'
+            -- Create user with remote access
+            CREATE USER 'your_username'@'%' IDENTIFIED BY 'your_password';
             
-            **For Remote MySQL:**
-            - Get connection details from your database administrator
-            - Ensure your IP is whitelisted for remote access
-            - Use the correct hostname (not localhost)
+            -- Grant privileges
+            GRANT ALL PRIVILEGES ON your_database_name.* TO 'your_username'@'%';
+            FLUSH PRIVILEGES;
+            
+            -- For authentication issues, try:
+            ALTER USER 'your_username'@'%' IDENTIFIED WITH mysql_native_password BY 'your_password';
+            ```
             """)
         
         # Test connection button (separate from main connect)
-        if st.button("Test Connection Parameters", key="test_mysql"):
+        if st.button("Test Connection", key="test_mysql"):
             if not all([host, database, username]):
                 st.error("Please fill in Host, Database, and Username to test connection")
             else:
@@ -696,7 +688,10 @@ def render_database_connection_form():
                     'port': port,
                     'database': database,
                     'username': username,
-                    'password': password
+                    'password': password,
+                    'connection_timeout': connection_timeout,
+                    'ssl_disabled': ssl_disabled,
+                    'auth_plugin': auth_plugin
                 }
                 
                 with st.spinner("Testing connection..."):
@@ -709,32 +704,16 @@ def render_database_connection_form():
                             st.error("Connection test failed")
                     except Exception as e:
                         st.error(f"Connection test failed: {e}")
-                        
-                        # Provide specific guidance based on error type
-                        error_str = str(e).lower()
-                        if "can't connect" in error_str:
-                            st.warning(
-                                "**Suggestion**: Check if MySQL server is running and "
-                                "the host/port are correct. For localhost, ensure MySQL "
-                                "server is installed and started."
-                            )
-                        elif "access denied" in error_str:
-                            st.warning(
-                                "**Suggestion**: Verify your username and password. "
-                                "For remote connections, ensure the user has remote access privileges."
-                            )
-                        elif "unknown database" in error_str:
-                            st.warning(
-                                "**Suggestion**: Check if the database name is correct "
-                                "and you have access to it."
-                            )
         
         connector_params = {
             'host': host,
             'port': port,
             'database': database,
             'username': username,
-            'password': password
+            'password': password,
+            'connection_timeout': connection_timeout,
+            'ssl_disabled': ssl_disabled,
+            'auth_plugin': auth_plugin
         }
     
     # Connect button
@@ -743,7 +722,7 @@ def render_database_connection_form():
         if db_type == "SQLite" and not connector_params.get('db_path'):
             st.error("Please provide a database file or path")
             return
-        elif db_type in ["PostgreSQL", "MySQL"]:
+        elif db_type in ["MySQL"]:
             required_fields = ['host', 'database', 'username']
             missing_fields = [field for field in required_fields if not connector_params.get(field)]
             if missing_fields:
@@ -781,7 +760,7 @@ def render_database_connection_form():
         if st.session_state.db_type == "SQLite":
             db_name = os.path.basename(st.session_state.connector_params.get('db_path', 'Unknown'))
             st.info(f"**{st.session_state.db_type}**: {db_name}")
-        elif st.session_state.db_type in ["PostgreSQL", "MySQL"]:
+        elif st.session_state.db_type in ["MySQL"]:
             params = st.session_state.connector_params
             st.info(f"**{st.session_state.db_type}**: {params.get('database', 'Unknown')} @ {params.get('host', 'Unknown')}:{params.get('port', 'Unknown')}")
         
@@ -1016,16 +995,12 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
     else:
         if db_type == "SQLite":
             select_clause = ", ".join([f"[{col}]" for col in selected_columns])
-        elif db_type == "PostgreSQL":
-            select_clause = ", ".join([f'"{col}"' for col in selected_columns])
         else:  # MySQL
             select_clause = ", ".join([f"`{col}`" for col in selected_columns])
             
     # FROM clause
     if db_type == "SQLite":
         query = f"SELECT {select_clause} FROM [{table_name}]"
-    elif db_type == "PostgreSQL":
-        query = f'SELECT {select_clause} FROM "{table_name}"'
     else:  # MySQL
         query = f"SELECT {select_clause} FROM `{table_name}`"
         
@@ -1040,8 +1015,6 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
         # Column quoting based on database type
         if db_type == "SQLite":
             quoted_col = f"[{column}]"
-        elif db_type == "PostgreSQL":
-            quoted_col = f'"{column}"'
         else:  # MySQL
             quoted_col = f"`{column}`"
 
@@ -1097,8 +1070,6 @@ def build_visual_query(table_name, table_info, db_type="SQLite"):
         direction = "ASC" if sort_direction == "Ascending (A-Z)" else "DESC"
         if db_type == "SQLite":
             query += f" ORDER BY [{sort_column}] {direction}"
-        elif db_type == "PostgreSQL":
-            query += f' ORDER BY "{sort_column}" {direction}'
         else:  # MySQL
             query += f" ORDER BY `{sort_column}` {direction}"
     
@@ -1122,7 +1093,7 @@ def convert_df_to_excel(df):
 def main():
     st.set_page_config(
         page_title="Multi-Database Table Downloader",
-        page_icon="Database",
+        page_icon="📊",
         layout="wide"
     )
     
@@ -1130,8 +1101,8 @@ def main():
     st.markdown("Connect to SQLite, PostgreSQL, or MySQL databases and download tables with a visual query builder!")
     
     # Show installation instructions if dependencies are missing
-    if not (POSTGRES_AVAILABLE or MYSQL_AVAILABLE or SQLALCHEMY_AVAILABLE):
-        st.warning("Missing Dependencies: To use PostgreSQL or MySQL, install: `pip install sqlalchemy psycopg2-binary mysql-connector-python pymysql`")
+    if not (MYSQL_AVAILABLE or SQLALCHEMY_AVAILABLE):
+        st.warning("Missing Dependencies for MySQL: Install with `pip install sqlalchemy mysql-connector-python pymysql`")
     
     # Sidebar for database connection
     with st.sidebar:
@@ -1217,9 +1188,7 @@ def main():
                                         st.code(custom_query, language='sql')
                                 
                                 elif query_type == "Custom SQL":
-                                    if st.session_state.db_type == "PostgreSQL":
-                                        default_query = f'SELECT * FROM "{table}" WHERE '
-                                    elif st.session_state.db_type == "MySQL":
+                                    if st.session_state.db_type == "MySQL":
                                         default_query = f"SELECT * FROM `{table}` WHERE "
                                     else: # SQLite
                                         default_query = f"SELECT * FROM [{table}] WHERE "
@@ -1337,7 +1306,7 @@ def main():
         This app makes it easy to browse, filter, and download tables from multiple database types.
         
         ### Features:
-        - **Multi-database support**: SQLite, PostgreSQL, and MySQL.
+        - **Multi-database support**: SQLite and MySQL.
         - **Flexible connections**: Upload SQLite files or connect to remote servers.
         - **Browse tables** with detailed metadata (row counts, columns).
         - **Visual Query Builder**: Point-and-click to create complex filters without writing SQL.
@@ -1348,8 +1317,35 @@ def main():
         ### Installation Requirements
         For full functionality, please install the required libraries:
         ```bash
-        pip install streamlit pandas sqlalchemy psycopg2-binary mysql-connector-python pymysql openpyxl
+        pip install streamlit pandas sqlalchemy mysql-connector-python pymysql openpyxl
         ```
+        
+        ### MySQL Connection Troubleshooting
+        If you're having MySQL connection issues:
+        
+        1. **Check MySQL Server Status:**
+           ```bash
+           # Windows
+           net start mysql80
+           
+           # macOS
+           sudo /usr/local/mysql/support-files/mysql.server start
+           
+           # Linux
+           sudo systemctl status mysql
+           sudo systemctl start mysql
+           ```
+           
+        2. **Test Command Line Access:**
+           ```bash
+           mysql -h your_host -P 3306 -u your_username -p your_database
+           ```
+           
+        3. **Common Fixes:**
+           - For "authentication plugin" errors, try the mysql_native_password option
+           - For SSL errors, disable SSL in advanced options
+           - For cloud databases, verify security group settings
+           - Check if your user has remote connection privileges
         
         ---
         **Get started by connecting to your database using the sidebar!**
